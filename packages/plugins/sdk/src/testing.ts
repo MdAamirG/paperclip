@@ -140,7 +140,11 @@ export interface TestHarness {
   executeTool<T = ToolResult>(name: string, params: unknown, runCtx?: Partial<ToolRunContext>): Promise<T>;
   /** Read raw in-memory state for assertions. */
   getState(input: ScopeKey): unknown;
-  /** Simulate a streaming event arriving for an active session. */
+  /**
+   * Simulate a streaming event arriving for an active session. A `done` or
+   * `error` event for the session's in-flight run marks that run finished, so
+   * a later `ctx.agents.sessions.cancelRun()` resolves to `null`.
+   */
   simulateSessionEvent(sessionId: string, event: Omit<AgentSessionEvent, "sessionId">): void;
   logs: TestHarnessLogEntry[];
   activity: Array<{ message: string; entityType?: string; entityId?: string; metadata?: Record<string, unknown> }>;
@@ -577,6 +581,8 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
 
   const sessions = new Map<string, AgentSession>();
   const sessionEventCallbacks = new Map<string, (event: AgentSessionEvent) => void>();
+  /** In-flight run id per session, set by sendMessage and cleared on done/error/cancel. */
+  const sessionInFlightRuns = new Map<string, string>();
 
   const events: EventRegistration[] = [];
   const jobs = new Map<string, (job: PluginJobContext) => Promise<void>>();
@@ -2280,7 +2286,17 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           if (opts.onEvent) {
             sessionEventCallbacks.set(sessionId, opts.onEvent);
           }
-          return { runId: randomUUID() };
+          const runId = randomUUID();
+          sessionInFlightRuns.set(sessionId, runId);
+          return { runId };
+        },
+        async cancelRun(sessionId, companyId, _opts) {
+          requireCapability(manifest, capabilitySet, "agent.sessions.send");
+          const session = sessions.get(sessionId);
+          if (!session || session.companyId !== companyId) throw new Error(`Session not found: ${sessionId}`);
+          if (!sessionInFlightRuns.has(sessionId)) return null;
+          sessionInFlightRuns.delete(sessionId);
+          return "cancelled";
         },
         async close(sessionId, companyId) {
           requireCapability(manifest, capabilitySet, "agent.sessions.close");
@@ -2289,6 +2305,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           if (session.companyId !== companyId) throw new Error(`Session not found: ${sessionId}`);
           session.status = "closed";
           sessionEventCallbacks.delete(sessionId);
+          sessionInFlightRuns.delete(sessionId);
         },
       },
     },
@@ -2683,6 +2700,12 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
     simulateSessionEvent(sessionId, event) {
       const cb = sessionEventCallbacks.get(sessionId);
       if (!cb) throw new Error(`No active session event callback for session: ${sessionId}`);
+      if (
+        (event.eventType === "done" || event.eventType === "error") &&
+        sessionInFlightRuns.get(sessionId) === event.runId
+      ) {
+        sessionInFlightRuns.delete(sessionId);
+      }
       cb({ ...event, sessionId });
     },
     logs,
