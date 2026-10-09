@@ -235,6 +235,32 @@ describeEmbeddedPostgres("plugin agent session cancelRun", () => {
     expect(await db.select().from(activityLog).where(eq(activityLog.actorType, "plugin"))).toEqual([]);
   });
 
+  it("logs one cancellation when two cancels from the same plugin overlap", async () => {
+    const { companyId, agentId } = await seedCompanyWithAgent();
+    const services = hostServicesFor();
+    const session = await services.agentSessions.create({ agentId, companyId });
+    const runId = await seedSessionRun({
+      companyId,
+      agentId,
+      taskKey: await readSessionTaskKey(session.sessionId),
+    });
+    // Both calls read the run as running; the overlapping call lands its
+    // cancel first, so the outer call's cancel returns the winner's row.
+    let overlapping: Promise<string | null> | null = null;
+    cancelRace.beforeCancel = async () => {
+      overlapping = services.agentSessions.cancelRun({ sessionId: session.sessionId, companyId });
+      await overlapping;
+    };
+
+    const outer = await services.agentSessions.cancelRun({ sessionId: session.sessionId, companyId });
+
+    await expect(overlapping).resolves.toBe("cancelled");
+    expect(outer).toBeNull();
+    expect((await readRun(runId)).status).toBe("cancelled");
+    const entries = await db.select().from(activityLog).where(eq(activityLog.action, "heartbeat.cancelled"));
+    expect(entries.map((entry) => entry.entityId)).toEqual([runId]);
+  });
+
   it("returns null when the session has nothing running", async () => {
     const { companyId, agentId } = await seedCompanyWithAgent();
     const services = hostServicesFor();

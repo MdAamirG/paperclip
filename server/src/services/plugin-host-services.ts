@@ -3649,6 +3649,9 @@ export function buildHostServices(
         const primary = inFlightRuns.find((run) => run.status === "running") ?? inFlightRuns[0]!;
         const ordered = [...inFlightRuns.filter((run) => run.id !== primary.id), primary];
         const reason = params.reason?.trim() || `Cancelled by plugin ${pluginKey}`;
+        // Identifies this call's cancel, so an overlapping cancelRun from the
+        // same plugin cannot claim (and log) a run this call stopped.
+        const cancelRequestId = randomUUID();
 
         let finalStatus: HeartbeatRunStatus | null = null;
         for (const target of ordered) {
@@ -3658,13 +3661,15 @@ export function buildHostServices(
             resultJson: {
               cancelledByActorType: "plugin",
               cancelledByPluginId: pluginId,
+              pluginCancelRequestId: cancelRequestId,
             },
           });
           // cancelRun returns an already-terminal run unchanged. A run that
-          // finished, or that someone else stopped, between the lookup above
-          // and this cancel was not cancelled by this plugin: no activity, and
-          // it counts as nothing in flight.
-          if (cancelled?.resultJson?.cancelledByPluginId !== pluginId) continue;
+          // finished, or that someone else (including another cancelRun call)
+          // stopped, between the lookup above and this cancel was not
+          // cancelled by this call: no activity, and it counts as nothing in
+          // flight.
+          if (cancelled?.resultJson?.pluginCancelRequestId !== cancelRequestId) continue;
           if (target.id === primary.id) finalStatus = cancelled.status as HeartbeatRunStatus;
           await logPluginActivity({
             companyId,
