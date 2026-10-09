@@ -349,6 +349,30 @@ describe("plugin SDK test harness", () => {
       await expect(harness.ctx.agents.sessions.cancelRun(session.sessionId, "company-1")).resolves.toBeNull();
     });
 
+    it("still cancels an earlier turn after a later turn of the session finished", async () => {
+      const harness = seededHarness(["agent.sessions.create", "agent.sessions.send"]);
+      const session = await harness.ctx.agents.sessions.create("agent-1", "company-1");
+      await harness.ctx.agents.sessions.sendMessage(session.sessionId, "company-1", {
+        prompt: "first",
+        onEvent: () => {},
+      });
+      const { runId: laterRunId } = await harness.ctx.agents.sessions.sendMessage(session.sessionId, "company-1", {
+        prompt: "second",
+        onEvent: () => {},
+      });
+      harness.simulateSessionEvent(session.sessionId, {
+        runId: laterRunId,
+        seq: 1,
+        eventType: "done",
+        stream: "system",
+        message: "finished",
+        payload: null,
+      });
+
+      await expect(harness.ctx.agents.sessions.cancelRun(session.sessionId, "company-1")).resolves.toBe("cancelled");
+      await expect(harness.ctx.agents.sessions.cancelRun(session.sessionId, "company-1")).resolves.toBeNull();
+    });
+
     it("requires agent.sessions.send", async () => {
       const harness = seededHarness(["agent.sessions.create"]);
       const session = await harness.ctx.agents.sessions.create("agent-1", "company-1");
