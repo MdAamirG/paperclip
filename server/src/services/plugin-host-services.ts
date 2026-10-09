@@ -1191,13 +1191,16 @@ export function buildHostServices(
   /**
    * A plugin owns the agent sessions it created: their taskKey carries this
    * plugin's `plugin:<pluginKey>:session:` prefix. Session reads and writes
-   * match on that prefix and the requested company.
+   * match on that prefix and the requested company. Plugin keys may contain
+   * `_`, a LIKE wildcard, so the key is escaped before it goes into the
+   * pattern.
    */
+  const ownedSessionTaskKeyPattern = `plugin:${pluginKey.replace(/[%_\\]/g, (ch) => `\\${ch}`)}:session:%`;
   const ownedSessionCondition = (sessionId: string, companyId: string) =>
     and(
       eq(agentTaskSessionsTable.id, sessionId),
       eq(agentTaskSessionsTable.companyId, companyId),
-      like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+      like(agentTaskSessionsTable.taskKey, ownedSessionTaskKeyPattern),
     );
 
   const requireOwnedSession = async (sessionId: string, companyId: string) => {
@@ -3497,7 +3500,7 @@ export function buildHostServices(
             and(
               eq(agentTaskSessionsTable.agentId, params.agentId),
               eq(agentTaskSessionsTable.companyId, companyId),
-              like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+              like(agentTaskSessionsTable.taskKey, ownedSessionTaskKeyPattern),
             ),
           )
           .orderBy(desc(agentTaskSessionsTable.createdAt));

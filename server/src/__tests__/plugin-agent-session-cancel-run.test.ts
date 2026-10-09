@@ -289,6 +289,26 @@ describeEmbeddedPostgres("plugin agent session cancelRun", () => {
     expect(await db.select().from(activityLog)).toEqual([]);
   });
 
+  it("does not treat an underscore in the plugin key as a wildcard", async () => {
+    const { companyId, agentId } = await seedCompanyWithAgent();
+    // `_` is a single-character LIKE wildcard, so an unescaped prefix
+    // `plugin:paperclip.owner_x:session:%` would match this owner's sessions.
+    const owner = hostServicesFor("owner-plugin-record-id", "paperclip.ownerAx");
+    const intruder = hostServicesFor("intruder-plugin-record-id", "paperclip.owner_x");
+    const session = await owner.agentSessions.create({ agentId, companyId });
+    const runId = await seedSessionRun({
+      companyId,
+      agentId,
+      taskKey: await readSessionTaskKey(session.sessionId),
+    });
+
+    await expect(
+      intruder.agentSessions.cancelRun({ sessionId: session.sessionId, companyId }),
+    ).rejects.toThrow(`Session not found: ${session.sessionId}`);
+    await expect(intruder.agentSessions.list({ agentId, companyId })).resolves.toEqual([]);
+    expect((await readRun(runId)).status).toBe("running");
+  });
+
   it("refuses a cross-company request for an owned session", async () => {
     const { companyId, agentId } = await seedCompanyWithAgent();
     const { companyId: otherCompanyId } = await seedCompanyWithAgent();
