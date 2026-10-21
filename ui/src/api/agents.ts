@@ -202,6 +202,7 @@ export const agentsApi = {
     api.delete<AgentInstructionsBundle>(
       agentPath(id, companyId, `/instructions-bundle/file?path=${encodeURIComponent(relativePath)}${baseHash ? `&baseHash=${baseHash}` : ""}`),
     ),
+  retryLifecycle: (id: string, companyId?: string) => api.post<Agent>(agentPath(id, companyId, "/lifecycle/retry"), {}),
   pause: (id: string, companyId?: string) => api.post<Agent>(agentPath(id, companyId, "/pause"), {}),
   resume: (id: string, companyId?: string) => api.post<Agent>(agentPath(id, companyId, "/resume"), {}),
   clearError: (id: string, companyId?: string) =>
@@ -231,11 +232,14 @@ export const agentsApi = {
   adapterModels: (
     companyId: string,
     type: string,
-    options?: { refresh?: boolean; environmentId?: string | null; provider?: string; poolId?: string },
+    options?: { refresh?: boolean; environmentId?: string | null; provider?: string; acpxAgent?: string; aiConnection?: import("@paperclipai/shared").AiConnectionBinding; agentId?: string; poolId?: string },
   ) => {
     const params = new URLSearchParams();
     if (options?.refresh) params.set("refresh", "1");
     if (options?.provider) params.set("provider", options.provider);
+    if (options?.acpxAgent) params.set("acpxAgent", options.acpxAgent);
+    if (options?.aiConnection) params.set("aiConnection", JSON.stringify(options.aiConnection));
+    if (options?.agentId) params.set("agentId", options.agentId);
     if (options?.poolId) params.set("poolId", options.poolId);
     if (options?.environmentId) params.set("environmentId", options.environmentId);
     const query = params.size > 0 ? `?${params.toString()}` : "";
@@ -252,6 +256,7 @@ export const agentsApi = {
     type: string,
     data: {
       adapterConfig: Record<string, unknown>;
+      runner?: import("@paperclipai/shared").AgentRunnerChoice;
       aiConnection?: import("@paperclipai/shared").AiRuntimeConnectionBinding;
       agentId?: string;
       testCredentials?: Record<string, string>;

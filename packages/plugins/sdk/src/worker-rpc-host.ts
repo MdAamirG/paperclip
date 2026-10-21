@@ -1,3 +1,7 @@
+import { workspaceProviderBindingSchema } from "@paperclipai/shared";
+import { pluginWorkspaceParamsSchema, parseWorkspaceProviderResult } from "./workspace-provider.js";
+import { environmentTaskOperationSchema, parseEnvironmentTaskResult, type PluginEnvironmentTaskParams } from "./environment-tasks.js";
+import type { AgentLifecycleRequest, AgentLifecycleResult } from "@paperclipai/shared";
 import type { AiConnectionRouterRequest, AiConnectionRouterResult } from "@paperclipai/shared";
 import { environmentCreationCleanupErrorData } from "./environment-creation-cleanup.js";
 import { environmentSyncErrorData, withEnvironmentSyncErrorCapture } from "./environment-sync-error.js";
@@ -38,6 +42,7 @@ import { createPluginIdleDrain } from "./idle-drain.js";
  * @see PLUGIN_SPEC.md §14 — SDK Surface
  */
 
+import type { ResourceLifecycleEvent } from "./types.js";
 import fs from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
@@ -91,6 +96,7 @@ import type {
   RefreshExternalObjectsParams,
   PluginEnvironmentAcquireLeaseParams,
   PluginEnvironmentDestroyLeaseParams,
+  PluginEnvironmentInspectLeaseParams,
   PluginEnvironmentExecuteParams,
   PluginEnvironmentRunnerIngressEndpointParams,
   PluginEnvironmentSyncInParams,
@@ -724,6 +730,9 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         async get(projectId: string, companyId: string) {
           return callHost("projects.get", { projectId, companyId });
         },
+        async getInstanceSecrets(projectId, companyId) {
+          return callHost("projects.getInstanceSecrets", { projectId, companyId });
+        },
 
         async listWorkspaces(projectId: string, companyId: string) {
           return callHost("projects.listWorkspaces", { projectId, companyId });
@@ -1153,6 +1162,9 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       },
 
       agents: {
+        async getRuntime(agentId, companyId) {
+          return callHost("agents.getRuntime", { agentId, companyId });
+        },
         async list(input) {
           return callHost("agents.list", {
             companyId: input.companyId,
@@ -1608,7 +1620,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
 
       sendMessage(createErrorResponse(id, errorCode, errorMessage,
         method === "environmentAcquireLease" || method === "environmentDestroyLease"
-          ? environmentCreationCleanupErrorData(err)
+          ? environmentCreationCleanupErrorData(err, method === "environmentAcquireLease")
           : method === "environmentSyncOut" ? environmentSyncErrorData(err) : undefined));
     } finally {
       done?.();
@@ -1667,6 +1679,17 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         return handleExecuteTool(params as ExecuteToolParams);
       case "detectExternalObjects":
         return handleDetectExternalObjects(params as DetectExternalObjectsParams);
+      case "workspaceOperation": {
+        if (!plugin.definition.onWorkspaceOperation) throw methodNotImplemented("workspaceOperation");
+        const input = pluginWorkspaceParamsSchema.parse(params);
+        return parseWorkspaceProviderResult(input, await plugin.definition.onWorkspaceOperation(input));
+      }
+      case "resourceLifecycle":
+        if (!plugin.definition.onResourceLifecycle) throw methodNotImplemented("resourceLifecycle");
+        return plugin.definition.onResourceLifecycle(params as ResourceLifecycleEvent);
+      case "agentLifecycle":
+        if (!plugin.definition.onAgentLifecycle) throw methodNotImplemented("agentLifecycle");
+        return plugin.definition.onAgentLifecycle(params as AgentLifecycleRequest);
       case "routeAiConnection":
         if (!plugin.definition.onRouteAiConnection) throw methodNotImplemented("routeAiConnection");
         return plugin.definition.onRouteAiConnection(params as AiConnectionRouterRequest);
@@ -1677,6 +1700,14 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
 
       case "environmentValidateConfig":
         return handleEnvironmentValidateConfig(params as PluginEnvironmentValidateConfigParams);
+
+      case "environmentTask": {
+        if (!plugin.definition.onEnvironmentTask) throw methodNotImplemented("environmentTask");
+        const input = params as PluginEnvironmentTaskParams;
+        if (input.workspace !== undefined) workspaceProviderBindingSchema.parse(input.workspace);
+        const operation = environmentTaskOperationSchema.parse(input.operation);
+        return parseEnvironmentTaskResult(operation, input.taskId, await plugin.definition.onEnvironmentTask({ ...input, operation }));
+      }
 
       case "environmentProbe":
         return handleEnvironmentProbe(params as PluginEnvironmentProbeParams);
@@ -1695,6 +1726,10 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
 
       case "environmentDestroyLease":
         return handleEnvironmentDestroyLease(params as PluginEnvironmentDestroyLeaseParams);
+
+      case "environmentInspectLease":
+        if (!plugin.definition.onEnvironmentInspectLease) throw methodNotImplemented("environmentInspectLease");
+        return plugin.definition.onEnvironmentInspectLease(params as PluginEnvironmentInspectLeaseParams);
 
       case "environmentRealizeWorkspace":
         return handleEnvironmentRealizeWorkspace(params as PluginEnvironmentRealizeWorkspaceParams);
@@ -1770,6 +1805,9 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     }
 
     manifest = params.manifest;
+    if (manifest.workspaceProvider && (!plugin.definition.onWorkspaceOperation || !plugin.definition.onResourceLifecycle)) {
+      throw new Error("Workspace provider requires workspace operations and project lifecycle handlers");
+    }
     currentConfig = params.config;
     databaseNamespace = params.databaseNamespace ?? null;
 
@@ -1787,16 +1825,21 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     if (plugin.definition.onIdleDrain) supportedMethods.push("prepareIdleSleep", "releaseIdleSleep");
     if (plugin.definition.onApiRequest) supportedMethods.push("handleApiRequest");
     if (plugin.definition.onDetectExternalObjects) supportedMethods.push("detectExternalObjects");
+    if (plugin.definition.onWorkspaceOperation) supportedMethods.push("workspaceOperation");
+    if (plugin.definition.onResourceLifecycle) supportedMethods.push("resourceLifecycle");
+    if (plugin.definition.onAgentLifecycle) supportedMethods.push("agentLifecycle");
     if (plugin.definition.onRouteAiConnection) supportedMethods.push("routeAiConnection");
     if (plugin.definition.onResolveExternalObject) supportedMethods.push("resolveExternalObject");
     if (plugin.definition.onRefreshExternalObjects) supportedMethods.push("refreshExternalObjects");
     if (plugin.definition.onEnvironmentValidateConfig) supportedMethods.push("environmentValidateConfig");
+    if (plugin.definition.onEnvironmentTask) supportedMethods.push("environmentTask");
     if (plugin.definition.onEnvironmentProbe) supportedMethods.push("environmentProbe");
     if (plugin.definition.onEnvironmentAcquireLease) supportedMethods.push("environmentAcquireLease");
     if (plugin.definition.onEnvironmentResumeLease) supportedMethods.push("environmentResumeLease");
     if (plugin.definition.onEnvironmentReleaseLease) supportedMethods.push("environmentReleaseLease");
     if (plugin.definition.onEnvironmentStopLease) supportedMethods.push("environmentStopLease");
     if (plugin.definition.onEnvironmentDestroyLease) supportedMethods.push("environmentDestroyLease");
+    if (plugin.definition.onEnvironmentInspectLease) supportedMethods.push("environmentInspectLease");
     if (plugin.definition.onEnvironmentRealizeWorkspace) supportedMethods.push("environmentRealizeWorkspace");
     if (plugin.definition.onEnvironmentExecute) supportedMethods.push("environmentExecute");
     if (plugin.definition.onEnvironmentRunnerIngressEndpoint) {
